@@ -98,7 +98,7 @@ class AssistantService : AccessibilityService() {
     private val overlayToast by lazy { OverlayToast(this@AssistantService, handler) }
 
     // ---- Floating AI bubble + confirm panel -------------------------------------------------
-    private val floating by lazy { FloatingAssistant(this@AssistantService, floatingListener) }
+    private val floating: FloatingAssistant by lazy { FloatingAssistant(this@AssistantService, floatingListener) }
     /** Focused editable node the bubble currently points at (owned here). */
     private var bubbleTarget: AccessibilityNodeInfo? = null
     /** Node the open panel will write into (owned here until handed to replaceText). */
@@ -1136,7 +1136,7 @@ class AssistantService : AccessibilityService() {
         return QuickActions.PRESETS + custom
     }
 
-    private val floatingListener = object : FloatingAssistant.Listener {
+    private val floatingListener: FloatingAssistant.Listener = object : FloatingAssistant.Listener {
         override fun onBubbleClick() {
             val target = bubbleTarget ?: return
             bubbleTarget = null
