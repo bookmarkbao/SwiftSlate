@@ -9,6 +9,8 @@ import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.musheer360.swiftslate.manager.KeyManager
+import com.musheer360.swiftslate.model.PrefKeys
+import com.musheer360.swiftslate.model.ProviderType
 import com.musheer360.swiftslate.worker.UpdateCheckWorker
 import java.util.concurrent.TimeUnit
 
@@ -40,7 +42,26 @@ class SwiftSlateApp : Application() {
         getSharedPreferences("stats", Context.MODE_PRIVATE)
 
         installCrashMarker()
-        scheduleUpdateCheck()
+        seedDeepSeekDefaults()
+        // This fork is sideloaded; the upstream update check would point at upstream releases
+        // whose signature cannot replace this build.
+        try { WorkManager.getInstance(this).cancelUniqueWork("update_check") } catch (_: Exception) {}
+    }
+
+    /**
+     * On a fresh install, default to DeepSeek through the Custom (OpenAI-compatible) provider,
+     * so only an API key is needed. Existing choices are never touched.
+     */
+    private fun seedDeepSeekDefaults() {
+        try {
+            val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
+            if (prefs.contains(PrefKeys.PROVIDER_TYPE)) return
+            prefs.edit()
+                .putString(PrefKeys.PROVIDER_TYPE, ProviderType.CUSTOM)
+                .putString(PrefKeys.CUSTOM_ENDPOINT, "https://api.deepseek.com/v1")
+                .putString(PrefKeys.CUSTOM_MODEL, "deepseek-chat")
+                .apply()
+        } catch (_: Exception) {}
     }
 
     /**

@@ -68,7 +68,8 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.findByName("release")
+            // Fork: fall back to the debug key so CI without signing secrets still yields an installable APK.
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
         // Installable side by side with a stable release: a different applicationId means

@@ -572,6 +572,42 @@ fun SettingsScreen(commandManager: CommandManager, prefs: SharedPreferences, key
 
         Spacer(modifier = Modifier.height(rhythm.cardGap))
 
+        // Floating AI bubble toggle
+        var floatingEnabled by remember {
+            mutableStateOf(prefs.getBoolean(PrefKeys.FLOATING_BUTTON_ENABLED, true))
+        }
+        SlateCard {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
+                    Text(
+                        text = stringResource(R.string.settings_floating_title),
+                        fontSize = rhythm.bodySize,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = stringResource(R.string.settings_floating_desc),
+                        fontSize = rhythm.bodySize,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = floatingEnabled,
+                    onCheckedChange = { checked ->
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        floatingEnabled = checked
+                        prefs.edit().putBoolean(PrefKeys.FLOATING_BUTTON_ENABLED, checked).apply()
+                    }
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(rhythm.cardGap))
+
         // Card 2: Trigger Prefix
         SlateCard {
             Row(

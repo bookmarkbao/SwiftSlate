@@ -6,19 +6,7 @@ on:
   # the recovery path when a run was cancelled mid-release and left a tag
   # behind (delete the orphan tag first, then dispatch).
   workflow_dispatch:
-  push:
-    branches: [master]
-    # Deliberately excludes '.github/workflows/**': the pipeline cuts a release
-    # on every matching push, and a CI-only commit must not burn a version
-    # number for zero app changes. Workflow changes made via PR still get
-    # lint/test through the pull_request trigger below.
-    paths:
-      - 'app/**'
-      - 'build.gradle.kts'
-      - 'settings.gradle.kts'
-      - 'gradle/**'
-      - 'gradle.properties'
-    tags: ['v*']
+  # Fork: automatic release-on-push disabled; APKs are built by apk.yml instead.
   # Contributor pull requests previously ran no CI at all: the workflow only
   # triggered on pushes to master, so #104 (50 locale files) was merged without
   # lint or tests ever seeing it. Only lint and test run here — build and release

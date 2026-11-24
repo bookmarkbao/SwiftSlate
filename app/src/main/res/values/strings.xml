@@ -155,4 +155,6 @@
     <string name="dashboard_service_killed_title">SwiftSlate was interrupted</string>
     <string name="dashboard_service_killed_message">The background service stopped unexpectedly. Re-enable it in accessibility settings to keep using commands.</string>
     <string name="dashboard_service_killed_dismiss">Dismiss</string>
+    <string name="settings_floating_title">Floating AI button</string>
+    <string name="settings_floating_desc">Show an AI button next to the input field you are typing in. Tap it to rewrite the text and confirm before it is filled back.</string>
 </resources>

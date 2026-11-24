@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -23,6 +24,9 @@ import com.musheer360.swiftslate.manager.KeyManager
 import com.musheer360.swiftslate.manager.StatsManager
 import com.musheer360.swiftslate.model.Command
 import com.musheer360.swiftslate.model.CommandType
+import com.musheer360.swiftslate.model.PrefKeys
+import com.musheer360.swiftslate.model.QuickAction
+import com.musheer360.swiftslate.model.QuickActions
 import com.musheer360.swiftslate.ui.processtext.ProcessTextEdit
 import com.musheer360.swiftslate.ui.processtext.ProcessTextReplacementBridge
 import com.musheer360.swiftslate.ui.processtext.resolveProcessTextEdit
@@ -92,6 +96,18 @@ class AssistantService : AccessibilityService() {
     private var lastTriggerRefresh = 0L
     private var watchdogRunnable: Runnable? = null
     private val overlayToast by lazy { OverlayToast(this@AssistantService, handler) }
+
+    // ---- Floating AI bubble + confirm panel -------------------------------------------------
+    private val floating by lazy { FloatingAssistant(this@AssistantService, floatingListener) }
+    /** Focused editable node the bubble currently points at (owned here). */
+    private var bubbleTarget: AccessibilityNodeInfo? = null
+    /** Node the open panel will write into (owned here until handed to replaceText). */
+    private var panelTarget: AccessibilityNodeInfo? = null
+    private var panelOriginal: String = ""
+    @Volatile
+    private var panelJob: Job? = null
+    private var bubbleRefreshRunnable: Runnable? = null
+    private var bubbleSettleRunnable: Runnable? = null
 
     /**
      * Stable identity for the field an undo point belongs to.
@@ -172,6 +188,11 @@ class AssistantService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        try {
+            onFloatingEvent(event)
+        } catch (e: Exception) {
+            Log.w(TAG, "floating bubble event failed", e)
+        }
         try {
             handleAccessibilityEvent(event)
         } catch (e: Exception) {
@@ -1000,6 +1021,297 @@ class AssistantService : AccessibilityService() {
         restoreClipboard(pending.first, pending.second, pending.third)
     }
 
+    // ============================================================================================
+    // Floating AI bubble
+    // ============================================================================================
+
+    private fun settingsPrefs() = getSharedPreferences("settings", Context.MODE_PRIVATE)
+
+    private fun isFloatingEnabled(): Boolean = try {
+        settingsPrefs().getBoolean(PrefKeys.FLOATING_BUTTON_ENABLED, true)
+    } catch (_: Exception) {
+        true
+    }
+
+    private fun onFloatingEvent(event: AccessibilityEvent?) {
+        event ?: return
+        if (!::keyManager.isInitialized) return
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_VIEW_FOCUSED,
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_CLICKED -> {
+                // Our own overlay windows report events too; they must not move the bubble.
+                if (event.packageName?.toString() == packageName) return
+                scheduleBubbleRefresh(150L, settle = false)
+            }
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED -> {
+                if (event.packageName?.toString() == packageName) return
+                // The keyboard sliding in/out moves the field; refresh again once it settles.
+                scheduleBubbleRefresh(200L, settle = true)
+            }
+        }
+    }
+
+    private fun scheduleBubbleRefresh(delayMs: Long, settle: Boolean) {
+        bubbleRefreshRunnable?.let { handler.removeCallbacks(it) }
+        val r = Runnable { safeRefreshBubble() }
+        bubbleRefreshRunnable = r
+        handler.postDelayed(r, delayMs)
+        if (settle) {
+            bubbleSettleRunnable?.let { handler.removeCallbacks(it) }
+            val s = Runnable { safeRefreshBubble() }
+            bubbleSettleRunnable = s
+            handler.postDelayed(s, 650L)
+        }
+    }
+
+    private fun safeRefreshBubble() {
+        try {
+            refreshBubble()
+        } catch (e: Exception) {
+            Log.w(TAG, "bubble refresh failed", e)
+            clearBubbleTarget()
+            floating.hideBubble()
+        }
+    }
+
+    private fun refreshBubble() {
+        if (floating.isPanelShowing) return
+        if (!isFloatingEnabled()) {
+            clearBubbleTarget()
+            floating.hideBubble()
+            return
+        }
+        val node = findFocusedEditableSource()
+        if (node == null) {
+            clearBubbleTarget()
+            floating.hideBubble()
+            return
+        }
+        val usable = node.packageName?.toString() != packageName &&
+            node.isEditable && !node.isPassword && hasRealText(node)
+        val rect = Rect()
+        if (usable) node.getBoundsInScreen(rect)
+        if (!usable || rect.isEmpty) {
+            node.safeRecycle()
+            clearBubbleTarget()
+            floating.hideBubble()
+            return
+        }
+        val prev = bubbleTarget
+        bubbleTarget = node
+        if (prev != null && prev !== node) prev.safeRecycle()
+        floating.showBubble(rect)
+    }
+
+    private fun hasRealText(node: AccessibilityNodeInfo): Boolean {
+        val text = node.text?.toString() ?: return false
+        if (text.isBlank()) return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && node.isShowingHintText) return false
+        return true
+    }
+
+    private fun clearBubbleTarget() {
+        bubbleTarget?.safeRecycle()
+        bubbleTarget = null
+    }
+
+    private fun clearPanelTarget() {
+        panelTarget?.safeRecycle()
+        panelTarget = null
+    }
+
+    /** Chinese presets first, then the user's own AI commands (label = trigger without prefix). */
+    private fun buildQuickActions(): List<QuickAction> {
+        val custom = try {
+            val prefix = commandManager.getTriggerPrefix()
+            val presetPrompts = QuickActions.PRESETS.map { it.prompt }.toSet()
+            commandManager.getCommands()
+                .filter { it.type == CommandType.AI && !it.isBuiltIn && it.prompt !in presetPrompts }
+                .map { QuickAction("cmd:" + it.trigger, it.trigger.removePrefix(prefix), it.prompt) }
+        } catch (_: Exception) {
+            emptyList()
+        }
+        return QuickActions.PRESETS + custom
+    }
+
+    private val floatingListener = object : FloatingAssistant.Listener {
+        override fun onBubbleClick() {
+            val target = bubbleTarget ?: return
+            bubbleTarget = null
+            val text = try {
+                if (target.refresh()) target.text?.toString().orEmpty() else ""
+            } catch (_: Exception) {
+                ""
+            }
+            if (text.isBlank() || !hasRealTextSafe(target)) {
+                target.safeRecycle()
+                floating.hideBubble()
+                overlayToast.show("输入框里还没有内容")
+                return
+            }
+            val rect = Rect()
+            try { target.getBoundsInScreen(rect) } catch (_: Exception) {}
+            clearPanelTarget()
+            panelTarget = target
+            panelOriginal = text
+
+            val actions = buildQuickActions()
+            val lastId = try {
+                settingsPrefs().getString(PrefKeys.FLOATING_LAST_ACTION, null)
+            } catch (_: Exception) {
+                null
+            }
+            val first = actions.firstOrNull { it.id == lastId } ?: QuickActions.DEFAULT
+            floating.showPanel(rect, text, actions)
+            if (!floating.isPanelShowing) {
+                clearPanelTarget()
+                overlayToast.show("无法显示面板")
+                return
+            }
+            runQuickAction(first)
+        }
+
+        override fun onActionSelected(action: QuickAction) {
+            try {
+                settingsPrefs().edit().putString(PrefKeys.FLOATING_LAST_ACTION, action.id).apply()
+            } catch (_: Exception) {}
+            runQuickAction(action)
+        }
+
+        override fun onApply(text: String) {
+            applyPanelResult(text)
+        }
+
+        override fun onCopy(text: String) {
+            try {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("SwiftSlate", text))
+                lastCopiedText = text
+                overlayToast.show("已复制")
+            } catch (_: Exception) {
+                overlayToast.show(getString(R.string.toast_clipboard_failed))
+            }
+        }
+
+        override fun onClose() {
+            closePanel()
+        }
+    }
+
+    private fun hasRealTextSafe(node: AccessibilityNodeInfo): Boolean =
+        try { hasRealText(node) } catch (_: Exception) { false }
+
+    private fun runQuickAction(action: QuickAction) {
+        val original = panelOriginal
+        floating.setLoading(action)
+        panelJob?.cancel()
+        panelJob = serviceScope.launch {
+            try {
+                val outcome = withTimeout(90_000) {
+                    runTextCommand(
+                        applicationContext, keyManager, client, openAIClient,
+                        action.prompt, original
+                    )
+                }
+                withContext(Dispatchers.Main) {
+                    if (!floating.isPanelShowing) return@withContext
+                    when (outcome) {
+                        is CommandOutcome.Success -> floating.setResult(outcome.text.trim())
+                        is CommandOutcome.Refusal -> floating.setError(getString(R.string.error_safety_blocked))
+                        is CommandOutcome.Unavailable -> floating.setError(outcome.message)
+                        is CommandOutcome.Failure -> floating.setError(outcome.message)
+                    }
+                }
+            } catch (e: TimeoutCancellationException) {
+                withContext(NonCancellable + Dispatchers.Main) {
+                    if (floating.isPanelShowing) floating.setError(getString(R.string.toast_request_timed_out))
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                withContext(NonCancellable + Dispatchers.Main) {
+                    if (floating.isPanelShowing) floating.setError(mapErrorMessage(e.message ?: "Unknown error"))
+                }
+            }
+        }
+    }
+
+    private fun closePanel() {
+        panelJob?.cancel()
+        panelJob = null
+        floating.hidePanel()
+        clearPanelTarget()
+        scheduleBubbleRefresh(150L, settle = false)
+    }
+
+    private fun applyPanelResult(result: String) {
+        val target = panelTarget ?: run {
+            closePanel()
+            return
+        }
+        panelTarget = null
+        panelJob?.cancel()
+        panelJob = null
+        floating.hidePanel()
+        val original = panelOriginal
+
+        if (!isProcessing.compareAndSet(false, true)) {
+            // A typed ?command is mid-flight; don't fight it for the field.
+            target.safeRecycle()
+            overlayToast.show("正在处理其它命令，请稍后再试")
+            return
+        }
+        startWatchdog()
+        cancelPendingProcessingReset()
+        currentJob?.cancel()
+        currentJob = serviceScope.launch {
+            val thisJob = coroutineContext[Job]
+            try {
+                val ok = replaceText(target, result)
+                if (ok) {
+                    withContext(Dispatchers.Main) {
+                        try {
+                            if (target.refresh()) {
+                                val len = target.text?.length ?: result.length
+                                val caret = Bundle().apply {
+                                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, len)
+                                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, len)
+                                }
+                                target.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, caret)
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    lastOriginalText = original
+                    lastUndoSourceId = sourceId(target)
+                    performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                } else {
+                    withContext(Dispatchers.Main) {
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("SwiftSlate", result))
+                        lastCopiedText = result
+                    }
+                    performHapticFeedback(HapticFeedbackConstants.REJECT)
+                    showToast("无法直接写入，已复制到剪贴板，请长按输入框粘贴")
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                showToast(getString(R.string.toast_replace_failed))
+            } finally {
+                withContext(NonCancellable + Dispatchers.Main) {
+                    if (currentJob === thisJob) {
+                        cancelWatchdog()
+                        scheduleProcessingReset()
+                    }
+                    recycleIfUnowned(target)
+                    scheduleBubbleRefresh(400L, settle = false)
+                }
+            }
+        }
+    }
+
     private fun mapErrorMessage(raw: String): String = getString(ErrorMessages.map(raw))
 
     private suspend fun showToast(msg: String) = withContext(Dispatchers.Main) {
@@ -1037,7 +1349,18 @@ class AssistantService : AccessibilityService() {
         }
     }
 
+    private fun teardownFloating() {
+        try {
+            panelJob?.cancel()
+            panelJob = null
+            floating.hideAll()
+            clearBubbleTarget()
+            clearPanelTarget()
+        } catch (_: Exception) {}
+    }
+
     override fun onInterrupt() {
+        teardownFloating()
         flushPendingClipRestore()
         isProcessing.set(false)
         currentJob?.cancel()
@@ -1052,6 +1375,7 @@ class AssistantService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        teardownFloating()
         flushPendingClipRestore()
         isProcessing.set(false)
         lastReplacedText = null

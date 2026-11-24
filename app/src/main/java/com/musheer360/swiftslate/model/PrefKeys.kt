@@ -30,4 +30,10 @@ object PrefKeys {
 
     /** Epoch millis when structured output was last disabled (0 = never). */
     const val STRUCTURED_OUTPUT_DISABLED_AT = "structured_output_disabled_at"
+
+    /** Whether the floating AI bubble is shown next to focused input fields (Boolean, default true). */
+    const val FLOATING_BUTTON_ENABLED = "floating_button_enabled"
+
+    /** Id of the QuickAction the floating panel ran last; it runs first next time. */
+    const val FLOATING_LAST_ACTION = "floating_last_action"
 }
